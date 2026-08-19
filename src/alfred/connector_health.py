@@ -20,6 +20,65 @@ from .db import Database
 
 HealthState = Literal["ok", "stale", "error", "never_synced"]
 
+#: How long each connector may go between syncs before it is genuinely
+#: behind. A single threshold reported three different things as one
+#: problem: the weekly calendar backfill looked broken five days in when it
+#: was not due for seven, which teaches the reader to ignore the column.
+#: Only connectors whose cadence differs from the default need an entry.
+STALE_AFTER: dict[str, timedelta] = {
+    # Full history refresh, deliberately weekly (--calendar-history-interval).
+    "google_calendar_history": timedelta(days=8),
+    # Canvas publishes on a school's schedule, not Alfred's.
+    "canvas_ical": timedelta(days=2),
+    "canvas": timedelta(days=2),
+}
+
+#: Services whose rows are internal bookkeeping rather than an external
+#: connector. The runtime heartbeat is how the watchdog knows Alfred is
+#: alive; listing it beside Gmail invites reading a liveness ping as a
+#: broken integration.
+INTERNAL = frozenset({"runtime"})
+
+#: One display name per external service. `sync_state` is keyed by
+#: (connector, account), which is right for the machinery -- each Google
+#: calendar syncs independently and fails independently -- and wrong for a
+#: dashboard, where six calendar rows plus a catalog row plus six history
+#: rows are thirteen lines describing "Google Calendar".
+SERVICE_OF: dict[str, str] = {
+    "google_calendar": "google calendar",
+    "google_calendar_catalog": "google calendar",
+    "google_calendar_history": "google calendar",
+    "gmail": "gmail",
+    "gmail_inbound": "gmail",
+    "github": "github",
+    "github_pull_requests": "github",
+    "google_health": "google health",
+    "canvas_ical": "canvas",
+    "canvas": "canvas",
+    "telegram": "telegram",
+    "slack": "slack",
+}
+
+
+class ServiceHealth(BaseModel):
+    """One external service, however many sync rows back it."""
+
+    service: str
+    state: HealthState
+    #: Worst-case freshness across the parts, since a service is only as
+    #: current as its least recent piece.
+    last_success_at: datetime | None
+    last_error: str | None
+    #: How many (connector, account) rows this covers, so a reader can tell
+    #: a single feed from six calendars without unfolding them.
+    sources: int
+    #: Named only when something is wrong, so a healthy row stays one line.
+    unhealthy: list[str] = []
+    #: Free-text context a grouped row would otherwise lose -- the address a
+    #: live probe actually reached, for instance, which is the one thing
+    #: worth knowing about a connector that has no sync history at all.
+    detail: str | None = None
+
 
 class ConnectorHealth(BaseModel):
     connector: str
@@ -52,7 +111,7 @@ def connector_health(
             state = "error"
         elif last_success is None:
             state = "never_synced"
-        elif checked_at - last_success > stale_after:
+        elif checked_at - last_success > STALE_AFTER.get(row["connector"], stale_after):
             state = "stale"
         else:
             state = "ok"
@@ -66,3 +125,54 @@ def connector_health(
             )
         )
     return results
+
+
+#: Worst first, so a service's state is the worst of its parts. An error in
+#: one calendar is an error for Google Calendar even if five others are fine.
+_SEVERITY = {"error": 3, "never_synced": 2, "stale": 1, "ok": 0}
+
+
+def service_health(
+    database: Database,
+    *,
+    now: datetime | None = None,
+    stale_after: timedelta = timedelta(hours=24),
+    include_internal: bool = False,
+) -> list[ServiceHealth]:
+    """Collapse connector rows into one line per external service.
+
+    `sync_state` is keyed by (connector, account) because that is what
+    actually syncs and fails independently. A dashboard wants the opposite:
+    thirteen rows describing Google Calendar are thirteen chances to
+    misread one slow backfill as an outage.
+
+    A service reports its worst part and its *oldest* success, so grouping
+    can only ever make the picture look worse than the rows, never better --
+    a summary that hid a broken calendar behind five working ones would be
+    worse than no summary.
+    """
+    grouped: dict[str, list[ConnectorHealth]] = {}
+    for entry in connector_health(database, now=now, stale_after=stale_after):
+        if not include_internal and entry.connector in INTERNAL:
+            continue
+        grouped.setdefault(SERVICE_OF.get(entry.connector, entry.connector), []).append(entry)
+
+    services: list[ServiceHealth] = []
+    for name, entries in sorted(grouped.items()):
+        worst = max(entries, key=lambda item: _SEVERITY[item.state])
+        successes = [item.last_success_at for item in entries if item.last_success_at]
+        services.append(
+            ServiceHealth(
+                service=name,
+                state=worst.state,
+                last_success_at=min(successes) if successes else None,
+                last_error=worst.last_error,
+                sources=len(entries),
+                unhealthy=sorted(
+                    {item.connector for item in entries if item.state != "ok"}
+                ),
+            )
+        )
+    # Anything needing attention first; a dashboard read top-down should not
+    # bury the one broken service under six working ones.
+    return sorted(services, key=lambda item: (-_SEVERITY[item.state], item.service))

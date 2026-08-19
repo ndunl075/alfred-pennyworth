@@ -46,7 +46,7 @@ from .audit import AuditLog
 from .briefing import BriefingService
 from .browseros_health import browseros_health
 from .connector_capabilities import CONNECTOR_CAPABILITIES
-from .connector_health import connector_health
+from .connector_health import ServiceHealth, service_health
 from .db import Database
 from .evaluation import EvaluationService
 from .http_auth import bearer_token
@@ -291,11 +291,31 @@ def create_admin_app(database: Database, *, bearer_token_value: str) -> Starlett
         return _render("approvals.html", active="approvals", approvals=approvals)
 
     async def connectors_page(request: Request) -> Response:
+        # Grouped by service rather than by (connector, account). The raw
+        # rows are right for the machinery -- six calendars sync and fail
+        # independently -- and wrong here, where thirteen lines describing
+        # Google Calendar are thirteen chances to misread one slow weekly
+        # backfill as an outage.
+        #
         # browseros_health() is a live probe, not a sync_state row -- see its
         # module docstring for why it can't come out of connector_health()
-        # itself. Appended last so sync-tracked connectors keep their stable
-        # order and this one shot doesn't reshuffle the page on every load.
-        connectors = [*connector_health(database), browseros_health()]
+        # itself. Adapted into the same shape and appended last, so one shot
+        # doesn't reshuffle the page on every load.
+        probe = browseros_health()
+        connectors = [
+            *service_health(database),
+            ServiceHealth(
+                service=probe.connector,
+                state=probe.state,
+                last_success_at=probe.last_success_at,
+                last_error=probe.last_error,
+                sources=1,
+                # The address actually probed. A grouped row would otherwise
+                # drop the one fact worth knowing about a connector with no
+                # sync history at all.
+                detail=probe.account,
+            ),
+        ]
         return _render(
             "connectors.html",
             active="connectors",

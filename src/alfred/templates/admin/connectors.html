@@ -8,8 +8,16 @@
     <div class="card">
       {% for connector in connectors %}
         <div class="row">
-          <div class="row-title">{{ connector.connector|connector_icon }} {{ connector.connector }} <span class="mono">· {{ connector.account }}</span></div>
-          <div class="row-meta">{% if connector.last_success_at %}last synced {{ connector.last_success_at|dt }}{% endif %}</div>
+          <div class="row-title">
+            {{ connector.service|connector_icon }} {{ connector.service }}
+            {% if connector.sources > 1 %}<span class="row-subtle">{{ connector.sources }} feeds</span>{% endif %}
+          </div>
+          <div class="row-meta">
+            {% if connector.last_success_at %}last synced {{ connector.last_success_at|dt }}{% elif connector.detail %}{{ connector.detail }}{% else %}never synced{% endif %}
+            {# Named only when something is wrong, so a healthy service stays
+               one line and the reader's attention goes where it is needed. #}
+            {% if connector.unhealthy %}<span class="mono">· {{ connector.unhealthy|join(', ') }}</span>{% endif %}
+          </div>
           <span class="pill {{ connector.state }}"><span class="pill-dot"></span>{{ connector.state|status_label }}</span>
         </div>
       {% else %}
