@@ -15,6 +15,8 @@ import argparse
 import inspect
 import json
 import os
+import re
+import time
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
@@ -24,6 +26,7 @@ from uuid import uuid4
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from .audit import AuditEvent, AuditLog
 from .briefing import BriefingService
 from .config import Settings
 from .connector_health import connector_health
@@ -127,7 +130,83 @@ def create_server(
     policy = PolicyStore(database)
     approvals = ApprovalService(database)
     workflow_observations = WorkflowObservationStore(database)
-    server = FastMCP("Alfred")
+    #: Pydantic quotes the offending input back inside its validation message
+    #: -- ``input_value={'text': 'my landlord is Priya at 555-0100'}`` -- so
+    #: storing the raw error would smuggle the argument values into the audit
+    #: log through the one field meant to be safe. The field names and the
+    #: reason survive; the data does not.
+    _INPUT_VALUE = re.compile(r"input_value=.*?(?=, input_type=|$)", re.DOTALL)
+
+    def _safe_error(error: BaseException) -> str:
+        return _INPUT_VALUE.sub("input_value=<redacted>", str(error))[:400]
+
+    class _AuditedFastMCP(FastMCP):
+        """Record what the model actually called, including the calls that failed.
+
+        Alfred logged the tools it *offered* a turn and nothing about what came
+        back. So a model that called ``calendar_event_propose`` with the wrong
+        argument names -- ``title`` instead of ``summary`` -- produced no
+        approval, no audit row, and no error anywhere: the owner saw only a
+        reply saying it had not worked. Every diagnosis had to start from a
+        screenshot.
+
+        The per-tool decorator cannot see this. FastMCP validates arguments
+        against the schema *before* dispatching, so a call naming the wrong
+        parameter never reaches the decorated function at all. call_tool is
+        the one seam every call passes through, valid or not.
+
+        Argument *names* are recorded, never values. Names are what diagnose a
+        malformed call, and values are the owner's mail, calendar, and health
+        data -- exactly what the audit log must not accumulate.
+        """
+
+        async def call_tool(self, name: str, arguments: dict[str, Any]):
+            started = time.perf_counter()
+            try:
+                result = await super().call_tool(name, arguments)
+            except Exception as error:
+                _record_call(name, arguments, started, error=error)
+                raise
+            _record_call(name, arguments, started)
+            return result
+
+    def _record_call(
+        name: str,
+        arguments: dict[str, Any],
+        started: float,
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        try:
+            AuditLog(database).append(
+                AuditEvent(
+                    actor=f"mcp:{client_id}",
+                    client=f"mcp:{client_id}",
+                    tool=name,
+                    outcome="error" if error else "ok",
+                    arguments={"argument_names": sorted(arguments or {})},
+                    result={
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                        # The type alone distinguishes a schema mismatch from a
+                        # connector outage, and the message for a validation
+                        # error names the parameters rather than the data.
+                        **(
+                            {
+                                "error_type": type(error).__name__,
+                                "error": _safe_error(error),
+                            }
+                            if error
+                            else {}
+                        ),
+                    },
+                    correlation_id=read_turn_id(settings.database_path),
+                )
+            )
+        except Exception:
+            # Telemetry must never be the reason a working tool fails.
+            pass
+
+    server = _AuditedFastMCP("Alfred")
 
     def alfred_tool(
         *,
