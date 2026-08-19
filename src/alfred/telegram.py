@@ -124,11 +124,17 @@ def _phrase_position(haystack: str, phrase: str) -> int | None:
     "treat me as a whole word" for the short, collision-prone entries
     (``" pr "``, ``"ci "``). Boundaries are non-alphanumeric rather than
     ``\\b`` so an apostrophe or question mark still ends a word.
+
+    A short final token is treated as whole-word for the same reason. The
+    loose end exists to let a stem reach its inflections, and a one- or
+    two-letter word is not a stem: the "a" of ``"book a"`` happily extended
+    into "book *a*nything", so asking what was already booked was
+    acknowledged as a request to book something.
     """
     stripped = phrase.strip()
     if not stripped:
         return None
-    whole_word_only = phrase.endswith(" ")
+    whole_word_only = phrase.endswith(" ") or len(stripped.rsplit(" ", 1)[-1]) <= 2
     for match in re.finditer(re.escape(stripped), haystack):
         before = haystack[match.start() - 1] if match.start() else " "
         if before.isalnum():
@@ -186,6 +192,32 @@ class TelegramGateway:
         "email them",
     )
     _EMAIL_ADDRESS = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
+
+    #: Writes whose object sits *between* the verb and the target, which a
+    #: contiguous phrase cannot express. "add to calendar" never matched
+    #: "add gym + lawns to family car calendar": the words being added sit in
+    #: the middle. With no action matched the request fell through to the read
+    #: topics, matched "calendar" there, and a message asking Alfred to write
+    #: the calendar was acknowledged "checking your agenda...".
+    #:
+    #: Naming the calendar back is the point of answering at all. "setting
+    #: that up..." would be accurate and still leave the owner wondering
+    #: which of six calendars it landed on.
+    _CALENDAR_WRITE = re.compile(
+        r"\b(?:add|adding|put|block|book|schedule|create|throw|stick|pencil|pop|slot|drop)\b"
+        r"[^.?!]{0,80}?\b(?:on|to|in|onto|into)\b\s+(?:my|the|our|his|her|their)?\s*"
+        r"(?P<name>(?:[\w'&-]+\s+){0,3}?)calendars?\b",
+        re.IGNORECASE,
+    )
+
+    #: A question about the calendar is not a request to change it. "did i
+    #: book anything on the family car calendar" matches the write shape
+    #: above word for word, and differs only in opening with an interrogative.
+    _ASKS_RATHER_THAN_TELLS = re.compile(
+        r"^\W*(?:what|whats|what's|when|where|who|which|why|how|do|does|did|is|are|am|"
+        r"was|were|can|could|should|will|would|any|anything|have|has)\b",
+        re.IGNORECASE,
+    )
 
     agent_ack_actions: tuple[tuple[tuple[str, ...], str], ...] = (
         (("search the web", "search online", "look it up", "look up online", "look online"),
@@ -262,6 +294,17 @@ class TelegramGateway:
             if addresses:
                 return f"drafting email to {addresses[0]}..."
             return "drafting that..."
+
+        # Checked before the literal phrases because it is strictly more
+        # specific: those would answer "setting that up..." for a calendar the
+        # owner named, and the name is the useful part of the reply.
+        calendar = cls._CALENDAR_WRITE.search(text)
+        if calendar and not cls._ASKS_RATHER_THAN_TELLS.match(text.strip()):
+            named = " ".join(calendar.group("name").split())
+            return f"adding that to your {named} calendar..." if named else (
+                "adding that to your calendar..."
+            )
+
         for keywords, ack in cls.agent_ack_actions:
             if any(_contains_phrase(haystack, keyword) for keyword in keywords):
                 return ack
