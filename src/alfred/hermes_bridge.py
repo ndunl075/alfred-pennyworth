@@ -1214,6 +1214,20 @@ class HermesBridge:
             "answer the request, call the tool that does, in this turn. never say a "
             "connector is unavailable or not talking to you unless a tool call actually "
             "failed and you can quote the error.\n"
+            # A calendar write was asked for with the wrong argument names, the
+            # error came back naming the right ones, and the reply was "want me
+            # to try again with those names?" -- putting the owner in the loop
+            # to relay information the model was already holding. Nothing was
+            # created. Retrying is not a permission question.
+            "if a tool call fails because the arguments were wrong, read the error, fix "
+            "the arguments and call it again in this same turn. do not ask whether to "
+            "retry, and do not report a failure you have not retried at least once.\n"
+            # Separately: it announced an approval was waiting when none existed,
+            # having read its own earlier message rather than any tool result.
+            "earlier messages in this conversation describe what was attempted, not what "
+            "is true now. never claim something is saved, sent, scheduled or awaiting "
+            "approval on the strength of having said so before -- only a tool result from "
+            "this turn establishes that.\n"
             f"{self._owner_identity_line()}"
             f"{self._scheduling_runtime_line(event)}\n"
             f"<alfred_context>{packed}</alfred_context>\n"
