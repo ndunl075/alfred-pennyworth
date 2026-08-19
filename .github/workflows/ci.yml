@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# Least privilege, stated rather than inherited. The repository default is
+# already read-only, but a default is a setting someone can change later,
+# and this workflow runs code from any pull request -- it should never be
+# one toggle away from a writable token.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: windows-latest
