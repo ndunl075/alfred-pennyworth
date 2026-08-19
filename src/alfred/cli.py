@@ -1734,6 +1734,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1 if report.unreachable and not report.no_clients_registered else 0
     if args.command == "hermes-mcp-register":
         result = register_hermes_mcp(
+            database.path,
             profile=args.profile,
             config_path=Path(args.config) if args.config else None,
             dry_run=args.dry_run,

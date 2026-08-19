@@ -32,7 +32,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from .db import Database
-from .hermes_mcp import is_registered, profile_config_path
+from .hermes_mcp import is_registered, profile_config_path, registered_database
 from .policy_coverage import PolicyCoverageService
 
 
@@ -58,6 +58,7 @@ def preflight(
 ) -> PreflightReport:
     checks = [
         _hermes_registration(profile=profile, profile_root=profile_root),
+        _same_database(database, profile=profile, profile_root=profile_root),
         _tool_reachability(database),
     ]
     return PreflightReport(ok=all(check.ok for check in checks), checks=checks)
@@ -88,6 +89,57 @@ def _hermes_registration(*, profile: str, profile_root: Path | None) -> Check:
             fix="alfred hermes-mcp-register",
         )
     return Check(name=name, ok=True, detail="Hermes is configured to start Alfred's MCP server")
+
+
+def _same_database(database: Database, *, profile: str, profile_root: Path | None) -> Check:
+    """Does the agent open the same database the runner writes to?
+
+    The fourth silent failure, and the worst-behaved of them: every tool call
+    succeeded. Hermes was registered without `--db`, so `alfred-mcp` fell back
+    to the *relative* default and resolved it against Hermes's working
+    directory instead of the project's. SQLite created the file, `migrate()`
+    gave it a complete schema, and the agent read a database that was empty
+    rather than one that was broken.
+
+    Nothing raised, because nothing was wrong: asked what it could do, Alfred
+    reported accurately from the database it had that Gmail was not connected.
+    A check for reachable tools cannot see this -- the tools were reachable --
+    so identity has to be its own question.
+    """
+    name = "mcp_database_matches"
+    path = profile_config_path(profile, profile_root=profile_root)
+    if not path.exists():
+        return Check(name=name, ok=True, detail="no Hermes profile to compare against")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        return Check(name=name, ok=False, detail=f"cannot read {path}: {error.__class__.__name__}")
+    if not is_registered(text):
+        # Already reported by the registration check; one failure, one line.
+        return Check(name=name, ok=True, detail="not registered; see the registration check")
+
+    ours = Path(database.path).expanduser().resolve()
+    theirs = registered_database(text)
+    if theirs is None:
+        return Check(
+            name=name,
+            ok=False,
+            detail=(
+                "Hermes starts Alfred's MCP server without --db, so it opens the relative "
+                f"default from its own working directory rather than {ours}. Tool calls will "
+                "succeed against an empty database and the agent will report your connectors "
+                "as missing"
+            ),
+            fix="alfred hermes-mcp-register",
+        )
+    if theirs.expanduser().resolve() != ours:
+        return Check(
+            name=name,
+            ok=False,
+            detail=f"the agent opens {theirs}, but the runner writes to {ours}",
+            fix="alfred hermes-mcp-register",
+        )
+    return Check(name=name, ok=True, detail=f"agent and runner share {ours}")
 
 
 def _tool_reachability(database: Database) -> Check:
