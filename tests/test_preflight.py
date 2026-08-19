@@ -15,7 +15,15 @@ from alfred.mcp_server import MCP_TOOL_NAMES
 from alfred.policy import PolicyStore
 from alfred.preflight import preflight
 
-REGISTERED = """\
+def _registered(database: Database) -> str:
+    """A registration that is actually complete.
+
+    This fixture used to omit `--db`, which is precisely the state that broke
+    the live install: Hermes resolved the relative default against its own
+    working directory and read an empty database. The fixture called that
+    "healthy", so the suite agreed with the bug.
+    """
+    return f"""\
 providers:
   ollama-local:
     api_key: ""
@@ -23,7 +31,7 @@ providers:
 mcp_servers:
   alfred:
     command: alfred-mcp
-    args: [--client-id, hermes]
+    args: [--client-id, hermes, --db, '{database.path.resolve().as_posix()}']
 """
 
 # The live config before registration: the key present only as an example.
@@ -64,7 +72,7 @@ def _check(report, name: str):
 def test_a_healthy_install_passes(tmp_path: Path) -> None:
     database = _granted(tmp_path, set(MCP_TOOL_NAMES))
 
-    report = preflight(database, profile_root=_profile(tmp_path, REGISTERED))
+    report = preflight(database, profile_root=_profile(tmp_path, _registered(database)))
 
     assert report.ok is True
     assert all(check.fix is None for check in report.checks)
@@ -100,7 +108,7 @@ def test_a_drifted_grant_is_caught(tmp_path: Path) -> None:
     ungranted = {"availability_get", "threads_awaiting_reply", "pull_requests_get"}
     database = _granted(tmp_path, set(MCP_TOOL_NAMES) - ungranted)
 
-    report = preflight(database, profile_root=_profile(tmp_path, REGISTERED))
+    report = preflight(database, profile_root=_profile(tmp_path, _registered(database)))
 
     check = _check(report, "mcp_tools_reachable")
     assert report.ok is False
@@ -123,7 +131,7 @@ def test_no_registered_client_reads_as_unconfigured(tmp_path: Path) -> None:
     database = Database(tmp_path / "alfred.db")
     database.migrate()
 
-    report = preflight(database, profile_root=_profile(tmp_path, REGISTERED))
+    report = preflight(database, profile_root=_profile(tmp_path, _registered(database)))
 
     check = _check(report, "mcp_tools_reachable")
     assert check.ok is False
@@ -149,7 +157,7 @@ def test_the_report_is_safe_to_paste(tmp_path: Path) -> None:
     database = _granted(tmp_path, set(MCP_TOOL_NAMES))
 
     payload = json.loads(
-        preflight(database, profile_root=_profile(tmp_path, REGISTERED)).model_dump_json()
+        preflight(database, profile_root=_profile(tmp_path, _registered(database))).model_dump_json()
     )
 
     assert set(payload) == {"ok", "checks"}

@@ -2,7 +2,17 @@ from pathlib import Path
 
 import pytest
 
+from alfred.db import Database
 from alfred.hermes_mcp import is_registered, profile_config_path, register
+
+
+def _db(tmp_path: Path) -> Path:
+    """Registration now names the database, because the relative default
+    resolved against Hermes's working directory rather than the project's.
+    """
+    database = Database(tmp_path / "db" / "alfred.db")
+    database.migrate()
+    return database.path
 
 LIVE_SHAPE = """\
 # Model/provider defaults for this profile.
@@ -46,7 +56,7 @@ def test_an_active_key_counts_as_registered() -> None:
 def test_registering_adds_the_key(tmp_path: Path) -> None:
     path = _config(tmp_path)
 
-    result = register(config_path=path)
+    result = register(_db(tmp_path), config_path=path)
 
     assert result.changed is True
     text = path.read_text(encoding="utf-8")
@@ -61,7 +71,7 @@ def test_every_comment_and_key_survives(tmp_path: Path) -> None:
     an anonymous one."""
     path = _config(tmp_path)
 
-    register(config_path=path)
+    register(_db(tmp_path), config_path=path)
 
     text = path.read_text(encoding="utf-8")
     for original_line in LIVE_SHAPE.splitlines():
@@ -70,10 +80,10 @@ def test_every_comment_and_key_survives(tmp_path: Path) -> None:
 
 def test_re_running_changes_nothing(tmp_path: Path) -> None:
     path = _config(tmp_path)
-    register(config_path=path)
+    register(_db(tmp_path), config_path=path)
     after_first = path.read_text(encoding="utf-8")
 
-    second = register(config_path=path)
+    second = register(_db(tmp_path), config_path=path)
 
     assert second.changed is False
     assert path.read_text(encoding="utf-8") == after_first
@@ -82,7 +92,7 @@ def test_re_running_changes_nothing(tmp_path: Path) -> None:
 def test_the_previous_file_is_kept(tmp_path: Path) -> None:
     path = _config(tmp_path)
 
-    result = register(config_path=path)
+    result = register(_db(tmp_path), config_path=path)
 
     assert result.backup_path is not None
     assert Path(result.backup_path).read_text(encoding="utf-8") == LIVE_SHAPE
@@ -91,7 +101,7 @@ def test_the_previous_file_is_kept(tmp_path: Path) -> None:
 def test_a_dry_run_writes_nothing(tmp_path: Path) -> None:
     path = _config(tmp_path)
 
-    result = register(config_path=path, dry_run=True)
+    result = register(_db(tmp_path), config_path=path, dry_run=True)
 
     assert result.changed is False
     assert path.read_text(encoding="utf-8") == LIVE_SHAPE
@@ -102,13 +112,13 @@ def test_a_missing_profile_is_refused_rather_than_created(tmp_path: Path) -> Non
     """Writing a fresh config would produce a profile Hermes has never
     installed, which fails later and further from the cause."""
     with pytest.raises(FileNotFoundError):
-        register(config_path=tmp_path / "nope" / "config.yaml")
+        register(_db(tmp_path), config_path=tmp_path / "nope" / "config.yaml")
 
 
 def test_a_file_without_a_trailing_newline_is_not_corrupted(tmp_path: Path) -> None:
     path = _config(tmp_path, "providers:\n  ollama-local:\n    api_key: \"\"")
 
-    register(config_path=path)
+    register(_db(tmp_path), config_path=path)
 
     text = path.read_text(encoding="utf-8")
     assert 'api_key: ""\n' in text
