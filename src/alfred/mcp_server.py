@@ -20,10 +20,11 @@ import time
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
-from typing import Any, Sequence, cast
+from typing import Annotated, Any, Sequence, cast
 from uuid import uuid4
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 from mcp.types import ToolAnnotations
 
 from .audit import AuditEvent, AuditLog
@@ -61,6 +62,17 @@ from .threads import ThreadService
 from .turn_handshake import read_tools as read_turn_tools
 from .turn_handshake import read_turn_id
 from .workflow_learning import WorkflowObservationStore
+
+#: A timestamp parameter, described in the schema rather than only in prose.
+#: Typed as a bare ``str``, these read to a model as "any string", and the
+#: first live calendar write after tool telemetry landed showed exactly that:
+#: ``start='tomorrow 10:30 am'``, rejected by fromisoformat. The retry
+#: recovered, but the round trip cost six seconds and a second inference, and
+#: the description is what makes the first attempt the right one.
+_Timestamp = Annotated[
+    str,
+    Field(description="ISO 8601 timestamp, e.g. 2026-08-20T10:30:00-04:00. Not a phrase."),
+]
 
 ALLOWED_SENSITIVITIES: frozenset[str] = frozenset({"public", "personal", "sensitive", "secret"})
 MCP_TOOL_NAMES: frozenset[str] = frozenset(
@@ -344,8 +356,17 @@ def create_server(
         return approval.model_dump(mode="json")
 
     @alfred_tool(destructive=False)
-    def calendar_event_propose(summary: str, start: str, end: str, calendar_id: str = "primary") -> dict:
+    def calendar_event_propose(
+        summary: str,
+        start: _Timestamp,
+        end: _Timestamp,
+        calendar_id: str = "primary",
+    ) -> dict:
         """Preview a calendar event write; nothing reaches Google until action_commit confirms it.
+
+        start and end must be ISO 8601 timestamps, not phrases. The owner says
+        "tomorrow from 10:30 am"; resolve that against the current time given
+        above and pass 2026-08-20T10:30:00-04:00.
 
         calendar_id accepts the name the owner uses -- "family car", "Dunlap
         Family" -- as well as a real Google id. Pass whatever calendar they
@@ -576,7 +597,11 @@ def create_server(
         return records
 
     @alfred_tool(destructive=False)
-    def task_upsert(title: str, task_id: str | None = None, due_at: str | None = None) -> dict:
+    def task_upsert(
+        title: str,
+        task_id: str | None = None,
+        due_at: _Timestamp | None = None,
+    ) -> dict:
         """Create a task, or update an existing one's title/due date when task_id is given.
 
         Decision 8 classifies this as automatic and reversible, unlike
