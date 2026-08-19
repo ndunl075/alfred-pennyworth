@@ -159,7 +159,7 @@ def test_gmail_supplies_a_name_for_a_person_calendar_could_not_name(tmp_path: Pa
     """Calendar often has the address but no displayName, which would leave a
     person labelled with an identifier nobody calls them."""
     database = Database(tmp_path / "alfred.db")
-    _event(database, "e1", organizer={"email": "alicia@example.com"})
+    _event(database, "e1", organizer={"email": "robin@example.com"})
     with database.connect() as connection:
         with database.transaction(connection):
             ConnectorRecordStore.upsert(
@@ -168,7 +168,7 @@ def test_gmail_supplies_a_name_for_a_person_calendar_could_not_name(tmp_path: Pa
                 account="self",
                 record_type="unread_message",
                 record_id="m1",
-                payload={"from": "Jamie Rivera <alicia@example.com>", "subject": "hi"},
+                payload={"from": "Jamie Rivera <robin@example.com>", "subject": "hi"},
                 active=True,
             )
 
@@ -179,10 +179,10 @@ def test_gmail_supplies_a_name_for_a_person_calendar_could_not_name(tmp_path: Pa
 
 def test_a_name_found_later_renames_a_person_without_losing_the_old_one(tmp_path: Path) -> None:
     database = Database(tmp_path / "alfred.db")
-    _event(database, "e1", organizer={"email": "alicia@example.com"})
+    _event(database, "e1", organizer={"email": "robin@example.com"})
     service = PeopleService(database)
     service.sync()
-    assert _people(database) == [("alicia@example.com", False)]
+    assert _people(database) == [("robin@example.com", False)]
 
     # The name turns up in a later mail sync.
     with database.connect() as connection:
@@ -193,7 +193,7 @@ def test_a_name_found_later_renames_a_person_without_losing_the_old_one(tmp_path
                 account="self",
                 record_type="unread_message",
                 record_id="m1",
-                payload={"from": "Jamie Rivera <alicia@example.com>", "subject": "hi"},
+                payload={"from": "Jamie Rivera <robin@example.com>", "subject": "hi"},
                 active=True,
             )
     result = service.sync()
@@ -201,7 +201,7 @@ def test_a_name_found_later_renames_a_person_without_losing_the_old_one(tmp_path
     assert result.named == 1
     assert _people(database) == [("Jamie Rivera", False)]
     # Renaming is not forgetting: the old label still resolves.
-    assert MemoryGraph(database).resolve_entity_by_name("alicia@example.com") is not None
+    assert MemoryGraph(database).resolve_entity_by_name("robin@example.com") is not None
     assert service.sync().named == 0  # and it settles
 
 
@@ -209,7 +209,7 @@ def test_an_archived_message_still_supplies_a_name(tmp_path: Path) -> None:
     """A message being read says nothing about whether its sender has a name --
     the one real correspondent in the live corpus was in the archived set."""
     database = Database(tmp_path / "alfred.db")
-    _event(database, "e1", organizer={"email": "alicia@example.com"})
+    _event(database, "e1", organizer={"email": "robin@example.com"})
     with database.connect() as connection:
         with database.transaction(connection):
             ConnectorRecordStore.upsert(
@@ -218,7 +218,7 @@ def test_an_archived_message_still_supplies_a_name(tmp_path: Path) -> None:
                 account="self",
                 record_type="unread_message",
                 record_id="m1",
-                payload={"from": "Jamie Rivera <alicia@example.com>", "subject": "hi"},
+                payload={"from": "Jamie Rivera <robin@example.com>", "subject": "hi"},
                 active=False,
             )
 
