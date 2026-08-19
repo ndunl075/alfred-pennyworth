@@ -266,7 +266,13 @@ def create_server(
 
     @alfred_tool(destructive=False)
     def calendar_event_propose(summary: str, start: str, end: str, calendar_id: str = "primary") -> dict:
-        """Preview a calendar event write; nothing reaches Google until action_commit confirms it."""
+        """Preview a calendar event write; nothing reaches Google until action_commit confirms it.
+
+        calendar_id accepts the name the owner uses -- "family car", "Dunlap
+        Family" -- as well as a real Google id. Pass whatever calendar they
+        named; it is resolved here, and an unknown or ambiguous name comes
+        back as an error listing the writable calendars rather than guessing.
+        """
         policy.require_write(client_id, "calendar_event_propose")
         parsed_start, parsed_end = datetime.fromisoformat(start), datetime.fromisoformat(end)
         actions = GoogleCalendarActions(database, approvals)

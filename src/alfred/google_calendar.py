@@ -462,6 +462,107 @@ class CalendarEventReceipt(BaseModel):
     replayed: bool
 
 
+class CalendarTarget(BaseModel):
+    """One calendar the owner could plausibly mean, and whether it can be written."""
+
+    calendar_id: str
+    title: str
+    writable: bool
+    primary: bool = False
+
+
+class CalendarTargetError(PolicyError):
+    """Raised when a named calendar cannot be resolved to exactly one writable id."""
+
+
+def known_calendars(database: Database) -> list[CalendarTarget]:
+    """Every calendar the catalog sync has seen, newest snapshot only."""
+    database.migrate()
+    with database.connect() as connection:
+        rows = connection.execute(
+            "SELECT record_id, payload_json FROM connector_records "
+            "WHERE connector = 'google_calendar' AND record_type = 'calendar' AND active = '1'"
+        ).fetchall()
+    targets: list[CalendarTarget] = []
+    for row in rows:
+        payload = json.loads(row["payload_json"])
+        targets.append(
+            CalendarTarget(
+                calendar_id=row["record_id"],
+                title=str(payload.get("title") or row["record_id"]),
+                writable=payload.get("access_role") in {"owner", "writer"},
+                primary=bool(payload.get("primary")),
+            )
+        )
+    return targets
+
+
+def resolve_calendar_target(database: Database, requested: str) -> CalendarTarget:
+    """Turn what the owner *called* a calendar into the id Google needs.
+
+    "add gym + lawns to family car calendar" produced an approval whose
+    calendar_id was the literal string "family car". Google has no such
+    calendar -- the owner's is
+    ``ba46437c...@group.calendar.google.com``, titled "FAMILY CAR" -- so the
+    write failed at the API after the owner had already approved it.
+
+    The mapping was sitting in the catalog the whole time. Nothing consulted
+    it, because ``calendar_event_propose`` took ``calendar_id`` as a plain
+    string and the model had no way to know that a name was not an id.
+
+    Refusing beats guessing here. A calendar write that lands somewhere
+    unintended is worse than one that does not happen, so an ambiguous or
+    unknown name raises with the writable titles listed rather than falling
+    back to the primary calendar.
+    """
+    wanted = " ".join(requested.split()).casefold()
+    if not wanted:
+        raise CalendarTargetError("no calendar was named")
+    calendars = known_calendars(database)
+    if not calendars:
+        # Nothing synced yet: pass through so a valid id still works, rather
+        # than blocking every write on a catalog sync that may never have run.
+        return CalendarTarget(calendar_id=requested, title=requested, writable=True)
+
+    if wanted == "primary":
+        for target in calendars:
+            if target.primary:
+                return _require_writable(target)
+
+    for target in calendars:
+        if target.calendar_id.casefold() == wanted:
+            return _require_writable(target)
+
+    matches = [target for target in calendars if target.title.casefold() == wanted]
+    if not matches:
+        # Substring, so "family car calendar" and "the car one" both reach
+        # "FAMILY CAR" without the owner having to quote it exactly.
+        matches = [
+            target
+            for target in calendars
+            if wanted in target.title.casefold() or target.title.casefold() in wanted
+        ]
+    writable = [target for target in matches if target.writable]
+    # Prefer a writable match: "Canvas" is read-only and would otherwise make
+    # an otherwise-unambiguous name ambiguous.
+    candidates = writable or matches
+    if len(candidates) == 1:
+        return _require_writable(candidates[0])
+
+    options = ", ".join(sorted(target.title for target in calendars if target.writable))
+    if not candidates:
+        raise CalendarTargetError(f"no calendar named {requested!r}; you can write to: {options}")
+    raise CalendarTargetError(
+        f"{requested!r} matches more than one calendar; you can write to: {options}"
+    )
+
+
+def _require_writable(target: CalendarTarget) -> CalendarTarget:
+    if not target.writable:
+        raise CalendarTargetError(f"{target.title!r} is read-only, so nothing can be added to it")
+    return target
+
+
 class GoogleCalendarActions:
     """A narrowly scoped, approval-gated write: create one calendar event.
 
@@ -485,11 +586,23 @@ class GoogleCalendarActions:
     def propose_event(
         self, *, actor: str, calendar_id: str, summary: str, start: datetime, end: datetime
     ) -> Any:
-        """Preview a calendar write without sending anything to Google yet."""
+        """Preview a calendar write without sending anything to Google yet.
+
+        ``calendar_id`` may be what the owner actually says -- "family car" --
+        and is resolved here, at proposal time. Resolving late, at execute(),
+        would mean the approval card showed a calendar that the write then
+        failed to find; resolving here means an unknown name is refused before
+        anyone is asked to approve it.
+        """
         if end <= start:
             raise ValueError("event end must be after start")
+        target = resolve_calendar_target(self.database, calendar_id)
         preview = {
-            "calendar_id": calendar_id,
+            "calendar_id": target.calendar_id,
+            # Carried so the approval card can name the calendar the way the
+            # owner does. Approving a write without being shown its target is
+            # the part of this flow that most needs to be legible.
+            "calendar_title": target.title,
             "summary": summary,
             "start": start.astimezone(UTC).isoformat(),
             "end": end.astimezone(UTC).isoformat(),
@@ -523,10 +636,15 @@ class GoogleCalendarActions:
         transport = self.transport
         if transport is None:
             raise ValueError("execute() requires a transport to reach Google")
-        if approval.state == "approved":
-            approval = self.approvals.consume(approval_id, actor=actor, token=token)
         preview = approval.preview
         event_id = _calendar_event_id(approval_id)
+        # Google first, then consume. The old order spent the approval before
+        # the call, so when the write failed -- as it did for every proposal
+        # naming a calendar by title -- the owner was left with an approval
+        # marked consumed, no event, and no way to retry without starting
+        # over. Duplicate safety does not depend on this ordering: the event
+        # id is derived from the approval id, so a replay after a crash
+        # reaches the same event rather than creating a second one.
         created = transport.create_event(
             calendar_id=preview["calendar_id"],
             event_id=event_id,
@@ -537,6 +655,8 @@ class GoogleCalendarActions:
         event_id = created.get("id")
         if not isinstance(event_id, str) or not event_id:
             raise ValueError("Google Calendar did not return an event id")
+        if approval.state == "approved":
+            self.approvals.consume(approval_id, actor=actor, token=token)
         html_link = created.get("htmlLink")
         payload = {"calendar_event_id": event_id, "html_url": html_link if isinstance(html_link, str) else None}
         with self.database.connect() as connection:

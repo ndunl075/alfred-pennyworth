@@ -36,8 +36,19 @@ _CALENDAR_WRITE_TERMS = re.compile(
 _MAIL_TERMS = re.compile(r"\b(?:email|gmail|inbox|mail|message|reply)\b", re.IGNORECASE)
 _EMAIL_ADDRESS = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.IGNORECASE)
 _MAIL_DRAFT_TERMS = re.compile(r"\b(?:compose|draft|reply|respond|write)\b", re.IGNORECASE)
+#: "email them" and "message them" were spelled out, but "them" is the one
+#: recipient a person almost never writes. "email mom and tell her im coming
+#: home friday" matched neither this nor the draft vocabulary, so a plain
+#: request to write to somebody selected *no tools at all* -- the work lane
+#: ran with an empty toolset and Alfred could only talk about doing it.
+#:
+#: So the verb takes any object: "email mom", "message sam", "text dad".
 _MAIL_SEND_TERMS = re.compile(
-    r"\b(?:send(?:\s+(?:it|this|that|to|an?\s+email|email))?|email them|message them)\b",
+    r"\b(?:send(?:\s+(?:it|this|that|to|an?\s+email|email))?"
+    # "reply" deliberately absent: it is draft vocabulary, and including it
+    # turned "draft a reply to that email" into a send proposal -- the one
+    # reading the word "draft" rules out.
+    r"|(?:email|message|text)\s+(?:my\s+|the\s+)?[a-z][\w'-]*)\b",
     re.IGNORECASE,
 )
 # Distinct from a plain inbox check: the bridge already prefetches unread mail,

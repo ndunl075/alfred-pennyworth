@@ -56,6 +56,10 @@ def action_preview(action_type: str, preview: dict[str, Any]) -> str:
         return "\n".join(
             [
                 f"event: {preview.get('summary') or '(untitled)'}",
+                # Named, because six calendars are configured and approving a
+                # write without being shown its target asks the owner to
+                # confirm something they cannot see.
+                f"calendar: {preview.get('calendar_title') or preview.get('calendar_id') or '?'}",
                 f"starts: {preview.get('start', '?')}",
                 f"ends: {preview.get('end', '?')}",
             ]
