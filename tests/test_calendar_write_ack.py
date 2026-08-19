@@ -89,3 +89,28 @@ def test_inflections_still_match() -> None:
 )
 def test_neighbouring_intents_are_undisturbed(message: str, expected: str) -> None:
     assert TelegramGateway.acknowledgement_for(message) == expected
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "email mom and tell her im coming home friday",
+        "message sam about tomorrow",
+        "email the landlord about the lease",
+    ],
+)
+def test_writing_to_a_person_selects_a_send_tool(message: str) -> None:
+    """"email them" and "message them" were spelled out, but "them" is the one
+    recipient nobody writes. A plain request to write to somebody matched
+    neither the send nor the draft vocabulary, so the work lane ran with an
+    empty toolset and Alfred could only talk about doing it."""
+    from alfred.hermes_tools import select_hermes_tools
+
+    assert "message_send_propose" in select_hermes_tools(message)
+
+
+def test_drafting_is_still_not_sending() -> None:
+    """The widened verb must not swallow the word that rules sending out."""
+    from alfred.hermes_tools import select_hermes_tools
+
+    assert select_hermes_tools("draft a reply to that email") == {"message_draft"}
