@@ -75,6 +75,45 @@ def action_preview(action_type: str, preview: dict[str, Any]) -> str:
     return ""
 
 
+def _when(start: Any, end: Any, *, now: datetime | None = None) -> str:
+    """Render a stored UTC span the way the owner said it.
+
+    The preview keeps UTC because that is what Google is given, and the
+    approval card showed it raw: "starts: 2026-08-20T14:30:00+00:00" for an
+    event the owner had asked for at 10:30 am. Correct, and unreadable, and
+    four hours off what they typed.
+
+    Returns "" rather than guessing when the timestamps are missing or
+    unparseable -- a sentence that simply omits the time is better than one
+    confidently naming the wrong one.
+    """
+    if not isinstance(start, str):
+        return ""
+    try:
+        opens = datetime.fromisoformat(start).astimezone()
+    except ValueError:
+        return ""
+    today = (now.astimezone() if now else datetime.now().astimezone()).date()
+    days = (opens.date() - today).days
+    day = {0: "today", 1: "tomorrow", -1: "yesterday"}.get(days)
+    if day is None:
+        # Inside the coming week a weekday reads faster than a date; past
+        # that, the date is the only thing that disambiguates.
+        day = opens.strftime("%A") if 0 < days < 7 else opens.strftime("%a %b %d")
+    span = _clock(opens)
+    if isinstance(end, str):
+        try:
+            span = f"{span}–{_clock(datetime.fromisoformat(end).astimezone())}"
+        except ValueError:
+            pass
+    return f" {day}, {span}"
+
+
+def _clock(moment: datetime) -> str:
+    """"10:30 am", not "10:30 AM" or "%-I" (which is not portable to Windows)."""
+    return moment.strftime("%I:%M %p").lstrip("0").lower()
+
+
 def _trim(body: str) -> str:
     if len(body) <= PREVIEW_BODY_CHARS:
         return body
@@ -149,7 +188,16 @@ class TelegramActionWorker:
                             intent["approval_id"], actor=self.actor, token=token
                         )
                     result = self.executor(intent["approval_id"], self.actor, token)
-                    message = self._success_message(intent["action_type"], result)
+                    # The preview holds what the owner asked for; the receipt
+                    # holds what the connector did. Naming the outcome takes
+                    # both -- "Gym + lawns" comes from one, the link from the
+                    # other -- and the approval is read before executing, so
+                    # consuming it does not cost us the detail.
+                    message = self._success_message(
+                        intent["action_type"],
+                        result,
+                        approval.preview if approval is not None else None,
+                    )
                 self._complete(intent, message)
                 if intent["decision"] == "approve":
                     self.secrets.delete(self._secret_name(intent["approval_id"]))
@@ -261,18 +309,96 @@ class TelegramActionWorker:
                     Outbox.enqueue(
                         connection,
                         destination=f"telegram:{intent['chat_id']}",
-                        payload={"text": "I couldn't finish that action. nothing else was attempted."},
+                        payload={"text": self._failure_message(intent["action_type"])},
                         idempotency_key=f"telegram-action-failed:{intent['approval_id']}",
                     )
 
     @staticmethod
-    def _success_message(action_type: str, result: dict[str, Any]) -> str:
-        messages = {
-            "calendar_event_create": "done — it’s on your calendar.",
-            "gmail_draft_create": "done — the email draft is ready.",
-            "gmail_message_send": "sent.",
-            "github_issue_create": "done — the GitHub issue is open.",
-            "composio_tool_execute": "done — the Composio action finished.",
-            "memory_forget": "done — I forgot it.",
-        }
-        return messages.get(action_type, "done.")
+    def _failure_message(action_type: str) -> str:
+        """Name the thing that did not happen.
+
+        "I couldn't finish that action. nothing else was attempted." was what
+        the owner got when a calendar write failed -- accurate, and it left
+        them unable to tell a failed calendar write from a failed send without
+        scrolling back to find which approval this replied to.
+
+        The reason is deliberately not quoted. An exception from a connector
+        can carry the message body or the recipient it choked on, and this
+        goes to a chat; the audit log is where the detail belongs. "nothing
+        else was attempted" stays, because after a failure the first thing
+        worth knowing is that nothing partial happened.
+        """
+        attempted = {
+            "calendar_event_create": "add that to your calendar",
+            "gmail_message_send": "send that email",
+            "gmail_draft_create": "save that draft",
+            "github_issue_create": "open that issue",
+            "memory_forget": "forget that",
+            "composio_tool_execute": "run that action",
+        }.get(action_type)
+        opening = f"I couldn't {attempted}." if attempted else "I couldn't finish that action."
+        return f"{opening} nothing else was attempted, and it's in the log if you want the reason."
+
+    @staticmethod
+    def _success_message(
+        action_type: str, result: dict[str, Any], preview: dict[str, Any] | None = None
+    ) -> str:
+        """Say what actually happened, not that something did.
+
+        "done — it's on your calendar" was the reply to every calendar write,
+        with the receipt's html_url and the approval's own preview both sitting
+        unread in the arguments. Six calendars are configured, so the one fact
+        the owner needed -- which one, and when -- was the fact left out, and
+        the only way to check was to go and look.
+
+        Everything named here came from the owner or from the connector's
+        receipt, so this repeats their own words back rather than asserting
+        anything new. Where a link exists it is included: a claim that an issue
+        was opened is worth more when it can be clicked.
+        """
+        preview = preview or {}
+        if action_type == "calendar_event_create":
+            summary = preview.get("summary") or "the event"
+            calendar = preview.get("calendar_title") or preview.get("calendar_id")
+            where = f" on your {calendar} calendar" if calendar else " on your calendar"
+            when = _when(preview.get("start"), preview.get("end"))
+            # A replayed receipt means the event already existed -- usually a
+            # retry after a timeout. Reporting it as new would invite the owner
+            # to go looking for a duplicate that is not there.
+            lead = "that was already there —" if result.get("replayed") else "done —"
+            message = f"{lead} “{summary}”{where}{when}."
+            link = result.get("html_url")
+            return f"{message}\n{link}" if link else message
+
+        if action_type in {"gmail_message_send", "gmail_draft_create"}:
+            to = preview.get("to")
+            subject = preview.get("subject")
+            what = "sent" if action_type == "gmail_message_send" else "drafted"
+            parts = [f"{what} to {to}" if to else what]
+            if subject:
+                parts.append(f"“{subject}”")
+            tail = " — it’s in your Gmail drafts." if action_type == "gmail_draft_create" else "."
+            return f"{' — '.join(parts)}{tail}"
+
+        if action_type == "github_issue_create":
+            number = result.get("issue_number")
+            repository = preview.get("repository")
+            title = preview.get("title")
+            opened = f"opened #{number}" if number else "opened the issue"
+            where = f" in {repository}" if repository else ""
+            named = f" — “{title}”" if title else ""
+            link = result.get("html_url")
+            message = f"{opened}{where}{named}."
+            return f"{message}\n{link}" if link else message
+
+        if action_type == "memory_forget":
+            # The statement is the owner's own, and quoting it is the only way
+            # they can tell which of several similar memories went.
+            statement = preview.get("statement") or preview.get("text")
+            return f"forgotten — “{_trim(str(statement))}”." if statement else "done — I forgot it."
+
+        if action_type == "composio_tool_execute":
+            tool = preview.get("tool") or preview.get("tool_slug")
+            return f"done — {tool} finished." if tool else "done — the Composio action finished."
+
+        return "done."

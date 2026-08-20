@@ -157,7 +157,12 @@ def test_telegram_approval_executes_once_without_persisting_the_raw_token(tmp_pa
     assert approval["state"] == "consumed"
     assert approval["token_hash"] != captured[0]
     assert intent["state"] == "completed"
-    assert json.loads(outbox["payload_json"])["text"] == "sent."
+    sent = json.loads(outbox["payload_json"])["text"]
+    # Was the bare "sent." The recipient and subject come from the
+    # approval the owner actually confirmed, so the reply can say which
+    # letter went rather than that one did.
+    assert "person@example.com" in sent
+    assert "hello" in sent
 
 
 def test_cancel_rejects_without_calling_the_executor(tmp_path: Path) -> None:
