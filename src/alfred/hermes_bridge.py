@@ -34,6 +34,7 @@ import json
 import os
 import random
 import re
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -1222,12 +1223,16 @@ class HermesBridge:
             "if a tool call fails because the arguments were wrong, read the error, fix "
             "the arguments and call it again in this same turn. do not ask whether to "
             "retry, and do not report a failure you have not retried at least once.\n"
-            # Separately: it announced an approval was waiting when none existed,
-            # having read its own earlier message rather than any tool result.
-            "earlier messages in this conversation describe what was attempted, not what "
-            "is true now. never claim something is saved, sent, scheduled or awaiting "
-            "approval on the strength of having said so before -- only a tool result from "
-            "this turn establishes that.\n"
+            # The history now carries action outcomes beside the promises that
+            # preceded them, so this asks the model to read what is there
+            # rather than to distrust all of it. Blanket distrust was the
+            # earlier wording, and it was wrong: the promise was the only
+            # evidence the model had, so doubting it left nothing to reason
+            # from.
+            "the history above records both what you said you would do and how those "
+            "actions turned out. an approval you announced is only still waiting if no "
+            "outcome follows it; if one failed, say so plainly rather than repeating the "
+            "original promise.\n"
             f"{self._owner_identity_line()}"
             f"{self._scheduling_runtime_line(event)}\n"
             f"<alfred_context>{packed}</alfred_context>\n"
@@ -1400,12 +1405,71 @@ class HermesBridge:
                 ).strip()
                 if assistant:
                     exchanges.append(
-                        {"user": str(row["content"] or ""), "assistant": assistant}
+                        {
+                            "user": str(row["content"] or ""),
+                            "assistant": assistant,
+                            "at": str(row["occurred_at"]),
+                        }
                     )
                 if len(exchanges) >= max_exchanges:
                     break
-        exchanges.reverse()
-        return exchanges
+            exchanges.reverse()
+            self._merge_action_outcomes(connection, event, cutoff, exchanges)
+        return [
+            {"user": exchange["user"], "assistant": exchange["assistant"]}
+            for exchange in exchanges
+        ]
+
+    @staticmethod
+    def _merge_action_outcomes(
+        connection: sqlite3.Connection,
+        event: dict[str, Any],
+        cutoff: str,
+        exchanges: list[dict[str, str]],
+    ) -> None:
+        """Put what an action *did* next to what Alfred said it *would* do.
+
+        Conversation history was assembled from `hermes-reply:{external_id}:%`
+        alone. An action's outcome lands in the same outbox under
+        `telegram-action-result:` / `telegram-action-failed:`, keyed by
+        approval id -- a different prefix and a different key, so the history
+        query could never match it.
+
+        The effect is a memory that keeps every promise and no result. Over
+        one week this database holds 167 hermes-reply rows against two action
+        outcomes. So Alfred remembered telling its owner "just hit approve and
+        it'll be on there", did not remember the write failing four minutes
+        later, and when asked again an hour afterwards said an approval was
+        already waiting. None was; the approvals table was empty.
+
+        A prompt line telling the model not to trust its own past claims was
+        the wrong fix for this, because the claim was the only evidence it
+        had. This gives it the other half.
+        """
+        rows = connection.execute(
+            """
+            SELECT payload_json, created_at FROM outbox
+            WHERE destination = ? AND created_at >= ?
+              AND (idempotency_key LIKE 'telegram-action-result:%'
+                   OR idempotency_key LIKE 'telegram-action-failed:%')
+            ORDER BY created_at
+            """,
+            (f"telegram:{event['chat_id']}", cutoff),
+        ).fetchall()
+        for row in rows:
+            text = str(json.loads(row["payload_json"]).get("text", "")).strip()
+            if not text:
+                continue
+            # Attached to the last exchange that precedes it, which is the one
+            # whose promise it settles. An outcome older than every exchange in
+            # the window has no conversation left to correct, so it is dropped
+            # rather than misfiled against a later, unrelated request.
+            preceding = [
+                exchange for exchange in exchanges if exchange["at"] <= str(row["created_at"])
+            ]
+            if not preceding:
+                continue
+            preceding[-1]["assistant"] = f"{preceding[-1]['assistant']}\n\n{text}"
 
     def _gmail_context(
         self, *, trace_candidates: dict[str, list[str]] | None = None
