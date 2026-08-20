@@ -1009,6 +1009,33 @@ class HermesBridge:
             ).fetchone()
         return str(row["latest"]) if row and row["latest"] else None
 
+    @staticmethod
+    def _toolless_note_for(allowed_tools: frozenset[str]) -> str:
+        """Told the model when this turn has no tools, so it stops inventing failures.
+
+        The keyword router selects nothing for a great many ordinary requests.
+        "What assignments do i have coming up?" is one, and the answer was
+        sitting in the context pack -- Homework #1, 26 August -- while the
+        model replied "my bad, that didn't go through, i'm having a little
+        trouble with the brief tool". There is no brief tool on a turn with
+        zero tools. It invented a failure to explain why it could not do what
+        the prompt told it to do.
+
+        The same question with two tools offered answered correctly from the
+        same data, which is what makes this the router's fault rather than the
+        model's. Until selection is replaced, saying plainly that there are no
+        tools this turn is what keeps a missing tool from being reported as a
+        broken one.
+        """
+        if allowed_tools:
+            return ""
+        return (
+            "\nno tools are available on this turn. answer from the context above, and if it "
+            "does not contain the answer say so plainly. do not attempt a tool call, and never "
+            "describe a tool as failing or unavailable -- none were offered, which is not the "
+            "same as one breaking.\n"
+        )
+
     def _run_agent_scoped(
         self,
         prompt: str,
@@ -1050,6 +1077,7 @@ class HermesBridge:
         run_scoped = getattr(self.agent, "run_scoped", None)
         if callable(run_scoped):
             allowed_tools = select_hermes_tools(topic_text)
+            prompt = prompt + self._toolless_note_for(allowed_tools)
             if isinstance(self.agent, SubprocessAgentRunner):
                 return run_scoped(
                     prompt,

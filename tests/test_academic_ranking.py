@@ -131,3 +131,23 @@ def test_an_unparseable_day_does_not_break_the_pack(tmp_path: Path) -> None:
     _day(database, good, "Homework")
 
     assert _days(database, "homework")[0] == good
+
+
+def test_a_turn_with_no_tools_says_so() -> None:
+    """The router selects nothing for many ordinary requests. Asked "what
+    assignments do i have coming up?", with the answer sitting in the context
+    pack, the model replied "i'm having a little trouble with the brief tool"
+    -- inventing a failure to explain why it could not do what the prompt told
+    it to. There is no brief tool on a turn with zero tools."""
+    from alfred.hermes_bridge import HermesBridge
+
+    note = HermesBridge._toolless_note_for(frozenset())
+
+    assert "no tools are available" in note
+    assert "answer from the context above" in note
+
+
+def test_a_turn_with_tools_gets_no_such_note() -> None:
+    from alfred.hermes_bridge import HermesBridge
+
+    assert HermesBridge._toolless_note_for(frozenset({"brief_get"})) == ""
