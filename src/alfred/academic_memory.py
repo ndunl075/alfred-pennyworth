@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -238,9 +238,22 @@ class AcademicMemoryService:
             groups=len(group_items),
         )
 
-    def search(self, query: str, *, limit: int = 6) -> AcademicSearchResult:
-        """Retrieve a tiny precomputed context pack; never scan raw events."""
+    def search(
+        self, query: str, *, limit: int = 6, now: datetime | None = None
+    ) -> AcademicSearchResult:
+        """Retrieve a tiny precomputed context pack; never scan raw events.
+
+        Ranked by relevance, then by nearness to today with the future
+        preferred. It used to fall back to latest-day-first, which is exactly
+        backwards for the question people actually ask. Asked "what
+        assignments do i have coming up" on 20 August, it returned 9, 8 and 3
+        December -- the end of the semester rather than the next thing due --
+        and asked "what's due tomorrow" it returned 2099, 2098 and 2097,
+        because a "Happy birthday!" recurrence expanded annually to the end of
+        the century outranked every real assignment by date alone.
+        """
         self.database.migrate()
+        today = (now or datetime.now(UTC)).date()
         terms: set[str] = set()
         for word in _WORDS.findall(query):
             canonical = word.casefold()
@@ -256,16 +269,34 @@ class AcademicMemoryService:
                 "SELECT * FROM academic_daily_rollups ORDER BY day DESC"
             ).fetchall()
 
-        def score(row: Any) -> tuple[int, str]:
-            text = str(row["search_text"])
-            tokens = set(word.casefold() for word in _WORDS.findall(text))
-            return (sum(term in tokens for term in ordered_terms), str(row["last_day"] if "last_day" in row.keys() else row["day"]))
+        def matches(row: Any) -> int:
+            tokens = set(word.casefold() for word in _WORDS.findall(str(row["search_text"])))
+            return sum(term in tokens for term in ordered_terms)
 
-        ranked_groups = sorted(groups, key=score, reverse=True)
-        ranked_days = sorted(days, key=score, reverse=True)
-        if ordered_terms and any(score(row)[0] for row in ranked_groups + ranked_days):
-            ranked_groups = [row for row in ranked_groups if score(row)[0] > 0]
-            ranked_days = [row for row in ranked_days if score(row)[0] > 0]
+        def rank(row: Any) -> tuple[int, int, int, str]:
+            """Best match first, then nearest, with the future winning a tie.
+
+            Ascending, so every component reads the same way: fewer matches is
+            worse, further away is worse. The day is the last resort and only
+            settles two rollups that are equally relevant and equally distant.
+            """
+            day = str(row["last_day"] if "last_day" in row.keys() else row["day"])
+            try:
+                distance = (date.fromisoformat(day[:10]) - today).days
+            except ValueError:
+                # An unparseable day sorts last rather than crashing the pack;
+                # losing one rollup beats losing the whole context.
+                return (0, 1, 10**6, day)
+            # Past items are not excluded -- "what did i turn in last week" is
+            # a real question -- only ordered behind upcoming ones at the same
+            # relevance.
+            return (-matches(row), 0 if distance >= 0 else 1, abs(distance), day)
+
+        ranked_groups = sorted(groups, key=rank)
+        ranked_days = sorted(days, key=rank)
+        if ordered_terms and any(matches(row) for row in ranked_groups + ranked_days):
+            ranked_groups = [row for row in ranked_groups if matches(row) > 0]
+            ranked_days = [row for row in ranked_days if matches(row) > 0]
         return AcademicSearchResult(
             groups=[
                 {

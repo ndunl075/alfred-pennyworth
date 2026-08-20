@@ -29,7 +29,10 @@ from alfred.db import Database
 from alfred.hermes_bridge import HermesBridge
 
 CHAT = 4242
-NOW = datetime(2026, 8, 19, 19, 45, tzinfo=UTC)
+#: Relative to the clock, not pinned to a date. The lookback window is
+#: measured from real "now", so a fixed timestamp silently aged out of it
+#: overnight and took six passing tests with it.
+NOW = datetime.now(UTC)
 
 
 def _database(tmp_path: Path) -> Database:
